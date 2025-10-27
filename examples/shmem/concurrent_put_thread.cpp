@@ -87,7 +87,7 @@ void ConcurrentPutThread() {
   int status;
   MPI_Init(NULL, NULL);
 
-  status = ShmemMpiInit(MPI_COMM_WORLD);
+  status = ShmemInit();
   assert(!status);
 
   // Assume in same node

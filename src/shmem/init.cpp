@@ -207,6 +207,10 @@ int ShmemMpiInit(MPI_Comm mpiComm) {
   return ShmemInit(new application::MpiBootstrapNetwork(mpiComm));
 }
 
+int ShmemInit() {
+  return ShmemMpiInit(MPI_COMM_WORLD);
+}
+
 int ShmemTorchProcessGroupInit(const std::string& groupName) {
   return ShmemInit(new application::TorchBootstrapNetwork(groupName));
 }
