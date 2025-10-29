@@ -25,6 +25,7 @@
 #include <linux/types.h>
 #include <stdint.h>
 
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -95,11 +96,26 @@ class SymmMemManager {
   SymmMemObjPtr ExtMallocWithFlags(size_t size, unsigned int flags);
   void Free(void* localPtr);
 
-  SymmMemObjPtr RegisterSymmMemObj(void* localPtr, size_t size);
+  SymmMemObjPtr RegisterSymmMemObj(void* localPtr, size_t size, bool heap_begin = false);
   void DeregisterSymmMemObj(void* localPtr);
 
   SymmMemObjPtr HeapRegisterSymmMemObj(void* localPtr, size_t size, SymmMemObjPtr* heapObj);
   void HeapDeregisterSymmMemObj(void* localPtr);
+
+  // VMM-based symmetric memory management
+  bool InitializeVMMHeap(size_t virtualSize, size_t chunkSize = 0);
+  void FinalizeVMMHeap();
+  SymmMemObjPtr VMMAllocChunk(size_t size, uint32_t allocType = hipMemAllocationTypePinned);
+  void VMMFreeChunk(void* localPtr);
+  bool IsVMMSupported() const;
+  SymmMemObjPtr VMMRegisterSymmMemObj(void* localPtr, size_t size, size_t startChunk, size_t numChunks);
+  
+  // Cross-process VMM memory sharing
+  bool VMMImportPeerMemory(int peerPe, void* localBaseAddr, size_t offset, size_t size, 
+                          const std::vector<int>& shareableHandles);
+
+  // Get VMM heap object (for accessing peer addresses and RDMA keys)
+  SymmMemObjPtr GetVMMHeapObj() const { return vmmHeapObj; }
 
   SymmMemObjPtr Get(void* localPtr) const;
 
@@ -107,6 +123,26 @@ class SymmMemManager {
   BootstrapNetwork& bootNet;
   Context& context;
   std::unordered_map<void*, SymmMemObjPtr> memObjPool;
+
+  // VMM heap management
+  struct VMMChunkInfo {
+    hipMemGenericAllocationHandle_t handle;
+    int shareableHandle;  // File descriptor for POSIX systems
+    size_t size;
+    size_t physicalSize;
+    bool isAllocated;
+  };
+
+  bool vmmInitialized{false};
+  void* vmmVirtualBasePtr{nullptr};
+  size_t vmmVirtualSize{0};
+  size_t vmmChunkSize{0};
+  size_t vmmMinChunkSize{0};
+  size_t vmmMaxChunks{0};
+  std::vector<VMMChunkInfo> vmmChunks;
+  std::mutex vmmLock;
+  bool vmmRdmaRegistered{false};
+  SymmMemObjPtr vmmHeapObj{nullptr, nullptr};  // Represents the entire VMM heap
 };
 
 }  // namespace application
