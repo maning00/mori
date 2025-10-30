@@ -134,7 +134,7 @@ class SymmMemManager {
   };
 
   bool vmmInitialized{false};
-  void* vmmVirtualBasePtr{nullptr};
+  void* vmmVirtualBasePtr{nullptr}; 
   size_t vmmVirtualSize{0};
   size_t vmmChunkSize{0};
   size_t vmmMinChunkSize{0};
@@ -143,6 +143,10 @@ class SymmMemManager {
   std::mutex vmmLock;
   bool vmmRdmaRegistered{false};
   SymmMemObjPtr vmmHeapObj{nullptr, nullptr};  // Represents the entire VMM heap
+
+  // Multi-PE virtual address spaces for cross-process mapping
+  std::vector<void*> vmmPeerBasePtrs;  // Virtual base addresses for each PE
+  size_t vmmPerPeerSize{0};  // Size of virtual address space per PE
 };
 
 }  // namespace application
