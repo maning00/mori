@@ -510,82 +510,75 @@ SymmMemObjPtr SymmMemManager::VMMAllocChunk(size_t size, uint32_t allocType) {
   allocProp.location.type = hipMemLocationTypeDevice;
   allocProp.location.id = currentDev;
 
-  // Store shareable handles for exchange - only the allocating PE creates handles
-  std::vector<int> localShareableHandles(chunksNeeded, -1);
+  // Store shareable handles for exchange
+  std::vector<int> localShareableHandles(chunksNeeded);
 
-  // Only rank 0 creates the physical memory and exports shareable handles
-  if (rank == 0) {
-    for (size_t i = 0; i < chunksNeeded; ++i) {
-      size_t chunkIdx = startChunk + i;
-      void* localChunkPtr =
-          static_cast<void*>(static_cast<char*>(vmmPeerBasePtrs[rank]) + chunkIdx * vmmChunkSize);
+  for (size_t i = 0; i < chunksNeeded; ++i) {
+    size_t chunkIdx = startChunk + i;
+    void* localChunkPtr =
+        static_cast<void*>(static_cast<char*>(vmmPeerBasePtrs[rank]) + chunkIdx * vmmChunkSize);
 
-      // Calculate actual physical memory needed for this chunk
-      size_t remainingSize = size - (i * vmmChunkSize);
-      size_t physicalSize = std::max(std::min(remainingSize, vmmChunkSize), vmmMinChunkSize);
+    // Calculate actual physical memory needed for this chunk
+    size_t remainingSize = size - (i * vmmChunkSize);
+    size_t physicalSize = std::max(std::min(remainingSize, vmmChunkSize), vmmMinChunkSize);
 
-      // Create physical memory with actual needed size
-      result = hipMemCreate(&vmmChunks[chunkIdx].handle, physicalSize, &allocProp, 0);
-      if (result != hipSuccess) {
-        MORI_APP_WARN(
-            "VMMAllocChunk failed: hipMemCreate failed for chunk {} with size {} bytes, allocType: "
-            "{}, device: {}, hipError: {}",
-            chunkIdx, physicalSize, allocType, currentDev, result);
-        // Cleanup already allocated chunks
-        for (size_t j = 0; j < i; ++j) {
-          size_t cleanupIdx = startChunk + j;
-          HIP_RUNTIME_CHECK(hipMemRelease(vmmChunks[cleanupIdx].handle));
-          vmmChunks[cleanupIdx].isAllocated = false;
-          vmmChunks[cleanupIdx].physicalSize = 0;
-        }
-        return SymmMemObjPtr{nullptr, nullptr};
+    // Create physical memory with actual needed size
+    result = hipMemCreate(&vmmChunks[chunkIdx].handle, physicalSize, &allocProp, 0);
+    if (result != hipSuccess) {
+      MORI_APP_WARN(
+          "VMMAllocChunk failed: hipMemCreate failed for chunk {} with size {} bytes, allocType: "
+          "{}, device: {}, hipError: {}",
+          chunkIdx, physicalSize, allocType, currentDev, result);
+      // Cleanup already allocated chunks
+      for (size_t j = 0; j < i; ++j) {
+        size_t cleanupIdx = startChunk + j;
+        HIP_RUNTIME_CHECK(hipMemRelease(vmmChunks[cleanupIdx].handle));
+        vmmChunks[cleanupIdx].isAllocated = false;
+        vmmChunks[cleanupIdx].physicalSize = 0;
       }
-
-      // Export shareable handle for cross-process sharing
-      result = hipMemExportToShareableHandle((void*)&vmmChunks[chunkIdx].shareableHandle,
-                                             vmmChunks[chunkIdx].handle,
-                                             hipMemHandleTypePosixFileDescriptor, 0);
-      if (result != hipSuccess) {
-        MORI_APP_WARN(
-            "VMMAllocChunk warning: hipMemExportToShareableHandle failed for chunk {}, hipError: {}. "
-            "Cross-process sharing may not work.",
-            chunkIdx, result);
-        vmmChunks[chunkIdx].shareableHandle = -1;
-      }
-
-      localShareableHandles[i] = vmmChunks[chunkIdx].shareableHandle;
-      MORI_APP_TRACE(
-          "VMMAllocChunk: RANK {} (allocator) Created chunk {} with physical size {} bytes, shareable handle {} (PID: {})",
-          rank, chunkIdx, physicalSize, vmmChunks[chunkIdx].shareableHandle, getpid());
-      
-      // Map physical memory to local virtual address
-      result = hipMemMap(localChunkPtr, physicalSize, 0, vmmChunks[chunkIdx].handle, 0);
-      if (result != hipSuccess) {
-        MORI_APP_WARN(
-            "VMMAllocChunk failed: hipMemMap failed for chunk {} at address {:p} with size {} bytes, "
-            "hipError: {}",
-            chunkIdx, localChunkPtr, physicalSize, result);
-        HIP_RUNTIME_CHECK(hipMemRelease(vmmChunks[chunkIdx].handle));
-        // Cleanup already allocated chunks
-        for (size_t j = 0; j < i; ++j) {
-          size_t cleanupIdx = startChunk + j;
-          void* cleanupPtr = static_cast<void*>(static_cast<char*>(vmmPeerBasePtrs[rank]) +
-                                                cleanupIdx * vmmChunkSize);
-          HIP_RUNTIME_CHECK(hipMemUnmap(cleanupPtr, vmmChunks[cleanupIdx].physicalSize));
-          HIP_RUNTIME_CHECK(hipMemRelease(vmmChunks[cleanupIdx].handle));
-          vmmChunks[cleanupIdx].isAllocated = false;
-          vmmChunks[cleanupIdx].physicalSize = 0;
-        }
-        return SymmMemObjPtr{nullptr, nullptr};
-      }
-
-      vmmChunks[chunkIdx].isAllocated = true;
-      vmmChunks[chunkIdx].size = vmmChunkSize;          // Virtual address space size
-      vmmChunks[chunkIdx].physicalSize = physicalSize;  // Actual physical memory allocated
+      return SymmMemObjPtr{nullptr, nullptr};
     }
-  } else {
-    // Non-allocating PEs just prepare empty handles - they will import from rank 0
-    MORI_APP_TRACE("VMMAllocChunk: RANK {} (consumer) waiting for shareable handles from rank 0", rank);
+
+    // Export shareable handle for cross-process sharing
+    result = hipMemExportToShareableHandle((void*)&vmmChunks[chunkIdx].shareableHandle,
+                                           vmmChunks[chunkIdx].handle,
+                                           hipMemHandleTypePosixFileDescriptor, 0);
+    if (result != hipSuccess) {
+      MORI_APP_WARN(
+          "VMMAllocChunk warning: hipMemExportToShareableHandle failed for chunk {}, hipError: {}. "
+          "Cross-process sharing may not work.",
+          chunkIdx, result);
+      vmmChunks[chunkIdx].shareableHandle = -1;
+    }
+
+    localShareableHandles[i] = vmmChunks[chunkIdx].shareableHandle;
+    MORI_APP_TRACE(
+        "VMMAllocChunk: RANK {} Created chunk {} with physical size {} bytes, shareable handle {}",
+        rank, chunkIdx, physicalSize, vmmChunks[chunkIdx].shareableHandle);
+    // Map physical memory to local virtual address
+    result = hipMemMap(localChunkPtr, physicalSize, 0, vmmChunks[chunkIdx].handle, 0);
+    if (result != hipSuccess) {
+      MORI_APP_WARN(
+          "VMMAllocChunk failed: hipMemMap failed for chunk {} at address {:p} with size {} bytes, "
+          "hipError: {}",
+          chunkIdx, localChunkPtr, physicalSize, result);
+      HIP_RUNTIME_CHECK(hipMemRelease(vmmChunks[chunkIdx].handle));
+      // Cleanup already allocated chunks
+      for (size_t j = 0; j < i; ++j) {
+        size_t cleanupIdx = startChunk + j;
+        void* cleanupPtr = static_cast<void*>(static_cast<char*>(vmmPeerBasePtrs[rank]) +
+                                              cleanupIdx * vmmChunkSize);
+        HIP_RUNTIME_CHECK(hipMemUnmap(cleanupPtr, vmmChunks[cleanupIdx].physicalSize));
+        HIP_RUNTIME_CHECK(hipMemRelease(vmmChunks[cleanupIdx].handle));
+        vmmChunks[cleanupIdx].isAllocated = false;
+        vmmChunks[cleanupIdx].physicalSize = 0;
+      }
+      return SymmMemObjPtr{nullptr, nullptr};
+    }
+
+    vmmChunks[chunkIdx].isAllocated = true;
+    vmmChunks[chunkIdx].size = vmmChunkSize;          // Virtual address space size
+    vmmChunks[chunkIdx].physicalSize = physicalSize;  // Actual physical memory allocated
   }
 
   // Exchange shareable handles among all PEs using bootstrap network
@@ -607,14 +600,14 @@ SymmMemObjPtr SymmMemManager::VMMAllocChunk(size_t size, uint32_t allocType) {
   for (int pe = 0; pe < worldSize; ++pe) {
     for (size_t i = 0; i < chunksNeeded; ++i) {
       int handleValue = allShareableHandlesFlat[pe * chunksNeeded + i];
-      MORI_APP_TRACE("RANK {} VMMAllocChunk: PE {} created shareable handle[{}] = {} (PID would be different per PE)", 
-                     rank, pe, i, handleValue);
+      MORI_APP_TRACE("RANK {} VMMAllocChunk: allShareableHandles[{}][{}] = {}", rank, pe, i,
+                     handleValue);
     }
   }
-  // Import and map to peer virtual address spaces for cross-process access
+  // Import and map to peer virtual address spaces for P2P accessible PEs
   for (int pe = 0; pe < worldSize; ++pe) {
-    if (pe == rank) continue;  // Skip self - no need to import our own handles
-    
+    if (pe == rank) continue;  // Skip self
+
     // Only map to P2P accessible PEs
     MORI_APP_TRACE(
         "VMMAllocChunk: RANK {} Checking transport type for PE {} context.GetTransportType(pe) = "
@@ -622,25 +615,26 @@ SymmMemObjPtr SymmMemManager::VMMAllocChunk(size_t size, uint32_t allocType) {
         rank, pe, context.GetTransportType(pe));
     if (context.GetTransportType(pe) == TransportType::P2P) {
       for (size_t i = 0; i < chunksNeeded; ++i) {
-        // Always import from rank 0's shareable handles (the memory allocator)
-        int handleValue = allShareableHandlesFlat[0 * chunksNeeded + i];
+        // Import the shareable handle from the target PE (not our own handle)
+        int handleValue = allShareableHandlesFlat[pe * chunksNeeded + i];
         MORI_APP_TRACE(
-            "VMMAllocChunk: RANK {} Importing rank 0's shareable handle for chunk {} to map to PE {} space, handle = {}",
-            rank, i, pe, handleValue);
+            "VMMAllocChunk: RANK {} Importing PE {}'s shareable handle for chunk {}, handle = {}",
+            rank, pe, i, handleValue);
         if (handleValue == -1) {
-          MORI_APP_WARN("Skipping invalid shareable handle from rank 0, chunk {}", i);
+          MORI_APP_WARN("Skipping invalid shareable handle from PE {}, chunk {}", pe, i);
           continue;
         }
 
-        // Calculate target address in PE's virtual space
+        // Calculate target address in peer's virtual space
+        MORI_APP_TRACE("VMMAllocChunk: RANK {} Preparing to map chunk {} to PE {} virtual addr",
+                       rank, i, pe);
         void* peerChunkPtr = static_cast<void*>(static_cast<char*>(vmmPeerBasePtrs[pe]) +
                                                 (startChunk + i) * vmmChunkSize);
-        
         MORI_APP_TRACE(
-            "VMMAllocChunk: RANK {} Mapping rank 0's chunk {} to PE {} virtual address {:p}",
-            rank, i, pe, peerChunkPtr);
-            
-        // Import the shareable handle from rank 0
+            "VMMAllocChunk: RANK {} Mapping chunk {} of size {} bytes to PE {} virtual address "
+            "{:p}",
+            rank, i, vmmChunks[startChunk + i].physicalSize, pe, peerChunkPtr);
+        // Import the shareable handle from the target PE
         hipMemGenericAllocationHandle_t importedHandle;
         result = hipMemImportFromShareableHandle(&importedHandle, (void*)&handleValue,
                                                  hipMemHandleTypePosixFileDescriptor);
@@ -651,21 +645,12 @@ SymmMemObjPtr SymmMemManager::VMMAllocChunk(size_t size, uint32_t allocType) {
           continue;
         }
         MORI_APP_TRACE(
-            "VMMAllocChunk: RANK {} Imported rank 0's shareable handle for chunk {} to map to PE {} virtual "
+            "VMMAllocChunk: RANK {} Imported shareable handle for chunk {} to map to PE {} virtual "
             "address {:p}",
             rank, i, pe, peerChunkPtr);
-        
-        // Map to PE's virtual address space
+        // Map to peer's virtual address space
         size_t chunkIdx = startChunk + i;
-        size_t physicalSize;
-        
-        // Calculate expected physical size (same logic as rank 0 used)
-        size_t remainingSize = size - (i * vmmChunkSize);
-        physicalSize = std::max(std::min(remainingSize, vmmChunkSize), vmmMinChunkSize);
-        
-        MORI_APP_TRACE("VMMAllocChunk: RANK {} calculated physicalSize = {} for chunk {}", 
-                       rank, physicalSize, i);
-        
+        size_t physicalSize = vmmChunks[chunkIdx].physicalSize;
         result = hipMemMap(peerChunkPtr, physicalSize, 0, importedHandle, 0);
         if (result != hipSuccess) {
           MORI_APP_WARN(
@@ -675,7 +660,7 @@ SymmMemObjPtr SymmMemManager::VMMAllocChunk(size_t size, uint32_t allocType) {
           continue;
         }
 
-        // Set access permissions for this virtual mapping
+        // Set access permissions for this peer virtual mapping
         hipMemAccessDesc accessDesc;
         accessDesc.location.type = hipMemLocationTypeDevice;
         accessDesc.location.id = pe;
@@ -687,56 +672,6 @@ SymmMemObjPtr SymmMemManager::VMMAllocChunk(size_t size, uint32_t allocType) {
                         i, result);
         }
       }
-    }
-  }
-  
-  // Handle self-mapping for non-rank 0 PEs (import rank 0's memory to own space)
-  if (rank != 0) {
-    for (size_t i = 0; i < chunksNeeded; ++i) {
-      int handleValue = allShareableHandlesFlat[0 * chunksNeeded + i];
-      if (handleValue == -1) {
-        MORI_APP_WARN("RANK {} cannot import invalid handle from rank 0 for self-mapping", rank);
-        continue;
-      }
-      
-      void* localChunkPtr = static_cast<void*>(static_cast<char*>(vmmPeerBasePtrs[rank]) +
-                                              (startChunk + i) * vmmChunkSize);
-      
-      MORI_APP_TRACE("VMMAllocChunk: RANK {} importing rank 0's handle {} for self-mapping to {:p}",
-                     rank, handleValue, localChunkPtr);
-      
-      // Import the shareable handle from rank 0
-      hipMemGenericAllocationHandle_t importedHandle;
-      result = hipMemImportFromShareableHandle(&importedHandle, (void*)&handleValue,
-                                               hipMemHandleTypePosixFileDescriptor);
-      if (result != hipSuccess) {
-        MORI_APP_WARN(
-            "RANK {} failed to import shareable handle for self-mapping, chunk {}, hipError: {}",
-            rank, i, result);
-        continue;
-      }
-      
-      // Calculate physical size
-      size_t remainingSize = size - (i * vmmChunkSize);
-      size_t physicalSize = std::max(std::min(remainingSize, vmmChunkSize), vmmMinChunkSize);
-      
-      // Map to own virtual address space
-      result = hipMemMap(localChunkPtr, physicalSize, 0, importedHandle, 0);
-      if (result != hipSuccess) {
-        MORI_APP_WARN(
-            "RANK {} failed to map imported memory for self-mapping, chunk {}, hipError: {}", 
-            rank, i, result);
-        HIP_RUNTIME_CHECK(hipMemRelease(importedHandle));
-        continue;
-      }
-      
-      // Update chunk tracking for non-rank 0 PE
-      size_t chunkIdx = startChunk + i;
-      vmmChunks[chunkIdx].isAllocated = true;
-      vmmChunks[chunkIdx].size = vmmChunkSize;
-      vmmChunks[chunkIdx].physicalSize = physicalSize;
-      vmmChunks[chunkIdx].handle = importedHandle;  // Store the imported handle
-      vmmChunks[chunkIdx].shareableHandle = -1;     // We don't export, rank 0 does
     }
   }
   MORI_APP_TRACE("VMMAllocChunk: RANK {} Allocated {} bytes using {} chunks starting at chunk {}",
