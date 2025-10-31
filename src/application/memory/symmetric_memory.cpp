@@ -663,7 +663,7 @@ SymmMemObjPtr SymmMemManager::VMMAllocChunk(size_t size, uint32_t allocType) {
         // Set access permissions for this peer virtual mapping
         hipMemAccessDesc accessDesc;
         accessDesc.location.type = hipMemLocationTypeDevice;
-        accessDesc.location.id = pe;
+        accessDesc.location.id = currentDev;  // Use current device, not PE number
         accessDesc.flags = hipMemAccessFlagsProtReadWrite;
 
         result = hipMemSetAccess(peerChunkPtr, physicalSize, &accessDesc, 1);
@@ -680,7 +680,7 @@ SymmMemObjPtr SymmMemManager::VMMAllocChunk(size_t size, uint32_t allocType) {
   std::vector<hipMemAccessDesc> accessDescs(worldSize);
   for (int pe = 0; pe < worldSize; ++pe) {
     accessDescs[pe].location.type = hipMemLocationTypeDevice;
-    accessDescs[pe].location.id = pe;
+    accessDescs[pe].location.id = currentDev;
     accessDescs[pe].flags = hipMemAccessFlagsProtReadWrite;
   }
 
