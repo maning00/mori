@@ -26,12 +26,14 @@
 #include <stdint.h>
 
 #include <mutex>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
 #include "mori/application/bootstrap/bootstrap.hpp"
 #include "mori/application/context/context.hpp"
 #include "mori/application/transport/transport.hpp"
+#include "mori/application/memory/vmm_va_manager.hpp"
 
 namespace mori {
 namespace application {
@@ -132,6 +134,15 @@ class SymmMemManager {
     size_t physicalSize;
     bool isAllocated;
   };
+  
+  // VA allocation tracking for memory reuse
+  struct VMMAllocation {
+    void* vaPtr;           // Virtual address pointer
+    size_t size;           // Allocation size
+    size_t startChunk;     // Starting chunk index
+    size_t numChunks;      // Number of chunks
+    bool hasPhysicalMem;   // Whether physical memory is allocated
+  };
 
   bool vmmInitialized{false};
   void* vmmVirtualBasePtr{nullptr}; 
@@ -147,6 +158,9 @@ class SymmMemManager {
   // Multi-PE virtual address spaces for cross-process mapping
   std::vector<void*> vmmPeerBasePtrs;  // Virtual base addresses for each PE
   size_t vmmPerPeerSize{0};  // Size of virtual address space per PE
+  
+  // VA Manager for tracking allocations and enabling reuse
+  std::unique_ptr<VMMVAManager> vmmVAManager;
 };
 
 }  // namespace application
