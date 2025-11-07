@@ -284,14 +284,11 @@ int main(int argc, char** argv) {
         
         // Step 4: Set access permissions for GPU 0
         std::cout << "[Rank 0] Setting access permissions for GPU 0...\n";
-        std::vector<hipMemAccessDesc> accessDesc(2);
-        accessDesc[0].location.type = hipMemLocationTypeDevice;
-        accessDesc[0].location.id = 0;  // GPU 0
-        accessDesc[0].flags = hipMemAccessFlagsProtReadWrite;
-        accessDesc[1].location.type = hipMemLocationTypeDevice;
-        accessDesc[1].location.id = 1;  // GPU 1
-        accessDesc[1].flags = hipMemAccessFlagsProtReadWrite;
-        HIP_CHECK(hipMemSetAccess(virtualPtr, memorySize, accessDesc.data(), 2));
+        hipMemAccessDesc accessDesc;
+        accessDesc.location.type = hipMemLocationTypeDevice;
+        accessDesc.location.id = deviceId;
+        accessDesc.flags = hipMemAccessFlagsProtReadWrite;
+        HIP_CHECK(hipMemSetAccess(virtualPtr, memorySize, &accessDesc, 1));
         std::cout << "[Rank 0] ✅ Access permissions set for GPU 0\n";
         
         // Step 5: Export shareable handle
@@ -483,14 +480,11 @@ int main(int argc, char** argv) {
         
         // Step 4: Set access permissions for GPU 1
         std::cout << "[Rank 1] Setting access permissions...\n";
-        std::vector<hipMemAccessDesc> accessDesc(2);
-        accessDesc[0].location.type = hipMemLocationTypeDevice;
-        accessDesc[0].location.id = 0;  // GPU 0
-        accessDesc[0].flags = hipMemAccessFlagsProtReadWrite;
-        accessDesc[1].location.type = hipMemLocationTypeDevice;
-        accessDesc[1].location.id = 1;  // GPU 1
-        accessDesc[1].flags = hipMemAccessFlagsProtReadWrite;
-        HIP_CHECK(hipMemSetAccess(virtualPtr, memorySize, accessDesc.data(), 2));
+        hipMemAccessDesc accessDesc;
+        accessDesc.location.type = hipMemLocationTypeDevice;
+        accessDesc.location.id = deviceId;
+        accessDesc.flags = hipMemAccessFlagsProtReadWrite;
+        HIP_CHECK(hipMemSetAccess(virtualPtr, memorySize, &accessDesc, 1));
         std::cout << "[Rank 1] ✅ Access permissions set\n";
         
         // Wait for Rank 0 to finish writing
