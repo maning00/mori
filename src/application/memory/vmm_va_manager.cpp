@@ -50,14 +50,6 @@ uintptr_t VMMVAManager::Allocate(size_t size, size_t alignment) {
     return 0;
   }
   
-  // Apply granularity-aware alignment strategy:
-  // - Starting address must align to granularity (if specified)
-  // - If allocation would cross granularity boundary, skip to next boundary
-  size_t effectiveAlignment = alignment;
-  if (granularity_ > 0) {
-    effectiveAlignment = std::max(alignment, granularity_);
-  }
-  
   // Align the requested size
   size_t alignedSize = AlignSize(size, alignment);
   
@@ -73,8 +65,8 @@ uintptr_t VMMVAManager::Allocate(size_t size, size_t alignment) {
       continue;  // Skip allocated or too-small blocks
     }
     
-    // Check address alignment with granularity consideration
-    uintptr_t alignedAddr = AlignSize(block.startAddr, effectiveAlignment);
+    // Check address alignment (use user-specified alignment, not granularity)
+    uintptr_t alignedAddr = AlignSize(block.startAddr, alignment);
     size_t alignmentWaste = alignedAddr - block.startAddr;
     
     if (alignmentWaste + alignedSize > block.size) {

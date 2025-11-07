@@ -129,10 +129,18 @@ class SymmMemManager {
   // VMM heap management
   struct VMMChunkInfo {
     hipMemGenericAllocationHandle_t handle;
-    int shareableHandle;  // File descriptor for POSIX systems
-    size_t size;
-    size_t physicalSize;
+    int shareableHandle;  // File descriptor for POSIX systems (for P2P)
+    size_t size;          // Chunk size (always equals granularity/vmmChunkSize)
     bool isAllocated;
+    
+    // RDMA registration info (per-chunk, for RDMA transport)
+    uint32_t lkey;                        // Local key for RDMA access
+    std::vector<uint32_t> peerRkeys;      // Remote keys from all PEs
+    bool rdmaRegistered;                  // Whether this chunk is RDMA registered
+    
+    VMMChunkInfo() 
+        : handle(0), shareableHandle(-1), size(0), 
+          isAllocated(false), lkey(0), rdmaRegistered(false) {}
   };
   
   // VA allocation tracking for memory reuse
