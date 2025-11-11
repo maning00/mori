@@ -43,7 +43,7 @@ struct SymmMemObj {
   uintptr_t* peerPtrs{nullptr};
   size_t size{0};
   // For Rdma
-  uint32_t lkey{0};
+  uint32_t lkey{nullptr};
   uint32_t* peerRkeys{nullptr};
   // For IPC
   hipIpcMemHandle_t* ipcMemHandles{nullptr};  // should only placed on cpu

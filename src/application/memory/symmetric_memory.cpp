@@ -365,9 +365,11 @@ bool SymmMemManager::InitializeVMMHeap(size_t virtualSize, size_t chunkSize) {
       static_cast<hipIpcMemHandle_t*>(calloc(worldSize, sizeof(hipIpcMemHandle_t)));
 
   // No unified RDMA keys - each chunk will have its own per-chunk RDMA registration
-  cpuHeapObj->peerRkeys = static_cast<uint32_t*>(calloc(worldSize, sizeof(uint32_t)));
-  cpuHeapObj->lkey = 0;
-  memset(cpuHeapObj->peerRkeys, 0, sizeof(uint32_t) * worldSize);
+  cpuHeapObj->peerRkeys =
+      static_cast<uint32_t*>(calloc(worldSize * vmmMaxChunks, sizeof(uint32_t)));
+  cpuHeapObj->lkey = static_cast<uint32_t*>(calloc(vmmMaxChunks, sizeof(uint32_t)));
+  memset(cpuHeapObj->peerRkeys, 0, sizeof(uint32_t) * worldSize * vmmMaxChunks);
+  memset(cpuHeapObj->lkey, 0, sizeof(uint32_t) * vmmMaxChunks);
 
   // Copy heap object to GPU memory
   SymmMemObj* gpuHeapObj;
@@ -378,9 +380,12 @@ bool SymmMemManager::InitializeVMMHeap(size_t virtualSize, size_t chunkSize) {
   HIP_RUNTIME_CHECK(hipMemcpy(gpuHeapObj->peerPtrs, cpuHeapObj->peerPtrs,
                               sizeof(uintptr_t) * worldSize, hipMemcpyHostToDevice));
 
-  HIP_RUNTIME_CHECK(hipMalloc(&gpuHeapObj->peerRkeys, sizeof(uint32_t) * worldSize));
+  HIP_RUNTIME_CHECK(hipMalloc(&gpuHeapObj->peerRkeys, sizeof(uint32_t) * worldSize * vmmMaxChunks));
   HIP_RUNTIME_CHECK(hipMemcpy(gpuHeapObj->peerRkeys, cpuHeapObj->peerRkeys,
-                              sizeof(uint32_t) * worldSize, hipMemcpyHostToDevice));
+                              sizeof(uint32_t) * worldSize * vmmMaxChunks, hipMemcpyHostToDevice));
+  HIP_RUNTIME_CHECK(hipMalloc(&gpuHeapObj->lkey, sizeof(uint32_t) * vmmMaxChunks));
+  HIP_RUNTIME_CHECK(hipMemcpy(gpuHeapObj->lkey, cpuHeapObj->lkey,
+                              sizeof(uint32_t) * vmmMaxChunks, hipMemcpyHostToDevice));
 
   // Store the VMM heap object
   vmmHeapObj = SymmMemObjPtr{cpuHeapObj, gpuHeapObj};
@@ -441,10 +446,12 @@ void SymmMemManager::FinalizeVMMHeap() {
   if (vmmHeapObj.IsValid()) {
     free(vmmHeapObj.cpu->peerPtrs);
     free(vmmHeapObj.cpu->peerRkeys);
+    free(vmmHeapObj.cpu->lkey);
     free(vmmHeapObj.cpu->ipcMemHandles);
     free(vmmHeapObj.cpu);
     HIP_RUNTIME_CHECK(hipFree(vmmHeapObj.gpu->peerPtrs));
     HIP_RUNTIME_CHECK(hipFree(vmmHeapObj.gpu->peerRkeys));
+    HIP_RUNTIME_CHECK(hipFree(vmmHeapObj.gpu->lkey));
     HIP_RUNTIME_CHECK(hipFree(vmmHeapObj.gpu));
     vmmHeapObj = SymmMemObjPtr{nullptr, nullptr};
   }
@@ -501,7 +508,8 @@ SymmMemObjPtr SymmMemManager::VMMAllocChunk(size_t size, uint32_t allocType) {
   size_t chunksNeeded = endChunk - startChunk;
 
   MORI_APP_TRACE(
-      "VMMAllocChunk: RANK {} allocated VA at {:p}, offset={}, size={}, startChunk={}, endChunk={}, chunksNeeded={}", 
+      "VMMAllocChunk: RANK {} allocated VA at {:p}, offset={}, size={}, startChunk={}, "
+      "endChunk={}, chunksNeeded={}",
       rank, startPtr, offset, size, startChunk, endChunk, chunksNeeded);
 
   // Step 2: Check if these chunks already have physical memory allocated (for reuse)
@@ -586,7 +594,8 @@ SymmMemObjPtr SymmMemManager::VMMAllocChunk(size_t size, uint32_t allocType) {
       }
       localShareableHandles[i] = vmmChunks[chunkIdx].shareableHandle;
       MORI_APP_TRACE(
-          "VMMAllocChunk: RANK {} Created chunk {} with granularity size {} bytes, shareable handle "
+          "VMMAllocChunk: RANK {} Created chunk {} with granularity size {} bytes, shareable "
+          "handle "
           "{}",
           rank, chunkIdx, vmmChunkSize, vmmChunks[chunkIdx].shareableHandle);
 
@@ -627,32 +636,31 @@ SymmMemObjPtr SymmMemManager::VMMAllocChunk(size_t size, uint32_t allocType) {
     if (p2pPeers.empty()) {
       MORI_APP_TRACE("RANK {} VMMAllocChunk: No P2P peers, skipping FD exchange", rank);
     } else {
-      MORI_APP_TRACE("RANK {} VMMAllocChunk: Found {} P2P peers for FD exchange: {}", 
-                     rank, p2pPeers.size(), 
-                     [&p2pPeers]() {
+      MORI_APP_TRACE("RANK {} VMMAllocChunk: Found {} P2P peers for FD exchange: {}", rank,
+                     p2pPeers.size(), [&p2pPeers]() {
                        std::string s;
                        for (int p : p2pPeers) s += std::to_string(p) + " ";
                        return s;
                      }());
-      
+
       std::vector<int> globalToPeerRank(worldSize, -1);  // -1 = not in P2P group
       int peerRank = 0;
-      
+
       // Assign peer ranks to all P2P peers in ascending global rank order
       std::vector<int> sortedP2pPeers = p2pPeers;
       sortedP2pPeers.push_back(rank);
       std::sort(sortedP2pPeers.begin(), sortedP2pPeers.end());
-      
+
       for (int globalRank : sortedP2pPeers) {
         globalToPeerRank[globalRank] = peerRank++;
       }
-      
+
       int myPeerRank = globalToPeerRank[rank];
       int p2pWorldSize = sortedP2pPeers.size();
-      
-      MORI_APP_TRACE("RANK {} has P2P peer rank {}/{} in P2P group", 
-                     rank, myPeerRank, p2pWorldSize);
-      
+
+      MORI_APP_TRACE("RANK {} has P2P peer rank {}/{} in P2P group", rank, myPeerRank,
+                     p2pWorldSize);
+
       application::LocalBootstrapNetwork localBootstrap(myPeerRank, p2pWorldSize);
       localBootstrap.Initialize();
 
@@ -668,15 +676,16 @@ SymmMemObjPtr SymmMemManager::VMMAllocChunk(size_t size, uint32_t allocType) {
       bool exchangeSuccess = localBootstrap.ExchangeFileDescriptors(localFdsForExchange, p2pFds);
 
       if (!exchangeSuccess) {
-        MORI_APP_ERROR("RANK {} VMMAllocChunk: Failed to exchange file descriptors with P2P peers", rank);
+        MORI_APP_ERROR("RANK {} VMMAllocChunk: Failed to exchange file descriptors with P2P peers",
+                       rank);
         MORI_APP_ERROR("P2P FD exchange requires all P2P peers on the same physical machine!");
         localBootstrap.Finalize();
         return SymmMemObjPtr();
       }
 
-      MORI_APP_TRACE("RANK {} VMMAllocChunk: Successfully exchanged FDs with {} P2P peers", 
-                     rank, p2pPeers.size());
-      
+      MORI_APP_TRACE("RANK {} VMMAllocChunk: Successfully exchanged FDs with {} P2P peers", rank,
+                     p2pPeers.size());
+
       // Convert peer-rank-indexed FDs to global-rank-indexed FDs
       std::vector<std::vector<int>> allFds(worldSize);
       for (int globalRank = 0; globalRank < worldSize; ++globalRank) {
@@ -697,8 +706,8 @@ SymmMemObjPtr SymmMemManager::VMMAllocChunk(size_t size, uint32_t allocType) {
           }
 
           if (handleValue == -1) {
-            MORI_APP_WARN("RANK {} skipping invalid shareable handle from PE {}, chunk {}", 
-                         rank, pe, i);
+            MORI_APP_WARN("RANK {} skipping invalid shareable handle from PE {}, chunk {}", rank,
+                          pe, i);
             continue;
           }
 
@@ -742,7 +751,7 @@ SymmMemObjPtr SymmMemManager::VMMAllocChunk(size_t size, uint32_t allocType) {
                          peerChunkPtr);
         }
       }
-      
+
       // Clean up LocalBootstrapNetwork after FD exchange is complete
       localBootstrap.Finalize();
       MORI_APP_TRACE("RANK {} LocalBootstrapNetwork finalized after FD exchange", rank);
