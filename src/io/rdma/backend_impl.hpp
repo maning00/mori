@@ -77,7 +77,7 @@ class RdmaManager {
   application::RdmaDeviceContext* GetRdmaDeviceContext(int devId);
 
   // Endpoint enumeration
-  using EnumerateEpCallbackFunc = std::function<void(int qpn, const EpPair& ep)>;
+  using EnumerateEpCallbackFunc = std::function<void(uint32_t qpn, const EpPair& ep)>;
   void EnumerateEndpoints(const EnumerateEpCallbackFunc&);
 
  private:
@@ -109,8 +109,6 @@ class NotifManager {
   void RegisterEndpointByQpn(uint32_t qpn);
   // void DeregisterEndpoint(EpPair*);
 
-  void RegisterDevice(int devId);
-
   bool PopInboundTransferStatus(const EngineKey&, TransferUniqueId, TransferStatus*);
 
   void MainLoop();
@@ -118,7 +116,7 @@ class NotifManager {
   void Shutdown();
 
  private:
-  void ProcessOneCqe(int qpn, const EpPair& ep);
+  void ProcessOneCqe(uint32_t qpn, const EpPair& ep);
 
  private:
   RdmaBackendConfig config;
@@ -131,13 +129,14 @@ class NotifManager {
 
   // Notification context
  private:
-  struct DeviceNotifContext {
-    ibv_srq* srq;
+  // Notification context
+ private:
+  struct QPNotifContext {
     application::RdmaMemoryRegion mr;
   };
 
   uint32_t maxNotifNum{8192};
-  std::unordered_map<int, DeviceNotifContext> notifCtx;
+  std::unordered_map<uint32_t, QPNotifContext> notifCtx;
   std::unordered_map<EngineKey, std::unordered_map<TransferUniqueId, int>> notifPool;
 
   std::unordered_map<TransferStatus*, int> localNotif;

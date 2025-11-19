@@ -55,14 +55,10 @@ std::vector<std::pair<int, int>> RdmaManager::Search(TopoKey key) {
         return {{i, 1}};
       }
     }
-  } else if (key.loc == MemoryLocationType::CPU) {
-    static std::atomic<int> roundRobinCounter{0};
-    if (!availDevices.empty()) {
-      int idx = roundRobinCounter.fetch_add(1) % availDevices.size();
-      return {{idx, 1}};
-    }
+  } else {
+    assert("topo searching for device other than GPU is not implemented yet");
+    return {};
   }
-  assert("topo searching for device other than CPU/GPU is not implemented yet");
   return {};
 }
 
@@ -142,7 +138,7 @@ application::RdmaEndpointConfig RdmaManager::GetRdmaEndpointConfig(int portId) {
   config.maxCqeNum = 8192;
   config.alignment = PAGESIZE;
   config.withCompChannel = true;
-  config.enableSrq = true;
+  config.enableSrq = false;
   return config;
 }
 
@@ -206,61 +202,61 @@ NotifManager::NotifManager(RdmaManager* rdmaMgr, const RdmaBackendConfig& cfg)
 NotifManager::~NotifManager() { Shutdown(); }
 
 void NotifManager::RegisterEndpointByQpn(uint32_t qpn) {
+  std::optional<EpPair> ep = rdma->GetEpPairByQpn(qpn);
+  assert(ep.has_value());
+
   if (config.pollCqMode == PollCqMode::EVENT) {
     epoll_event ev;
     ev.events = EPOLLIN;
     ev.data.u32 = qpn;
-    std::optional<EpPair> ep = rdma->GetEpPairByQpn(qpn);
-    assert(ep.has_value() && ep->local.ibvHandle.compCh);
+    assert(ep->local.ibvHandle.compCh);
     SYSCALL_RETURN_ZERO(epoll_ctl(epfd, EPOLL_CTL_ADD, ep->local.ibvHandle.compCh->fd, &ev));
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    if (notifCtx.find(qpn) != notifCtx.end()) return;
+
+    application::RdmaDeviceContext* devCtx = rdma->GetRdmaDeviceContext(ep->ldevId);
+    assert(devCtx);
+
+    void* buf;
+    SYSCALL_RETURN_ZERO(posix_memalign(reinterpret_cast<void**>(&buf), PAGESIZE,
+                                       maxNotifNum * sizeof(NotifMessage)));
+    application::RdmaMemoryRegion mr =
+        devCtx->RegisterRdmaMemoryRegion(buf, maxNotifNum * sizeof(NotifMessage));
+    notifCtx.insert({qpn, {mr}});
+
+    // Pre post notification receive wr
+    // TODO: should use min(maxNotifNum, maxSrqWrNum)
+    for (uint64_t i = 0; i < maxNotifNum; i++) {
+      struct ibv_sge sge{};
+      sge.addr = mr.addr + i * sizeof(NotifMessage);
+      sge.length = sizeof(NotifMessage);
+      sge.lkey = mr.lkey;
+
+      struct ibv_recv_wr wr{};
+      wr.wr_id = i;
+      wr.sg_list = &sge;
+      wr.num_sge = 1;
+
+      struct ibv_recv_wr* bad = nullptr;
+      SYSCALL_RETURN_ZERO(ibv_post_recv(ep->local.ibvHandle.qp, &wr, &bad));
+    };
   }
 }
 
-void NotifManager::RegisterDevice(int devId) {
-  std::lock_guard<std::mutex> lock(mu);
-  if (notifCtx.find(devId) != notifCtx.end()) return;
-
-  application::RdmaDeviceContext* devCtx = rdma->GetRdmaDeviceContext(devId);
-  assert(devCtx);
-
-  void* buf;
-  SYSCALL_RETURN_ZERO(
-      posix_memalign(reinterpret_cast<void**>(&buf), PAGESIZE, maxNotifNum * sizeof(NotifMessage)));
-  application::RdmaMemoryRegion mr =
-      devCtx->RegisterRdmaMemoryRegion(buf, maxNotifNum * sizeof(NotifMessage));
-  struct ibv_srq* srq = devCtx->GetIbvSrq();
-  assert(srq);
-  notifCtx.insert({devId, {srq, mr}});
-
-  // Pre post notification receive wr
-  // TODO: should use min(maxNotifNum, maxSrqWrNum)
-  for (uint64_t i = 0; i < maxNotifNum; i++) {
-    struct ibv_sge sge{};
-    sge.addr = mr.addr + i * sizeof(NotifMessage);
-    sge.length = sizeof(NotifMessage);
-    sge.lkey = mr.lkey;
-
-    struct ibv_recv_wr wr{};
-    wr.wr_id = i;
-    wr.sg_list = &sge;
-    wr.num_sge = 1;
-
-    struct ibv_recv_wr* bad = nullptr;
-    SYSCALL_RETURN_ZERO(ibv_post_srq_recv(srq, &wr, &bad));
-  };
-}
-
-void NotifManager::ProcessOneCqe(int qpn, const EpPair& ep) {
+void NotifManager::ProcessOneCqe(uint32_t qpn, const EpPair& ep) {
   ibv_cq* cq = ep.local.ibvHandle.cq;
 
   struct ibv_wc wc{};
   while (ibv_poll_cq(cq, 1, &wc) > 0) {
     if (wc.opcode == IBV_WC_RECV) {
       std::lock_guard<std::mutex> lock(mu);
-      int devId = ep.ldevId;
+      // int devId = ep.ldevId;
 
-      assert(notifCtx.find(devId) != notifCtx.end());
-      DeviceNotifContext& ctx = notifCtx[devId];
+      assert(notifCtx.find(qpn) != notifCtx.end());
+      QPNotifContext& ctx = notifCtx[qpn];
 
       // FIXME: this notif mechenism has bug when notif index is wrapped around
       uint64_t idx = wc.wr_id;
@@ -291,7 +287,7 @@ void NotifManager::ProcessOneCqe(int qpn, const EpPair& ep) {
       wr.sg_list = &sge;
       wr.num_sge = 1;
       struct ibv_recv_wr* bad = nullptr;
-      SYSCALL_RETURN_ZERO(ibv_post_srq_recv(ctx.srq, &wr, &bad));
+      SYSCALL_RETURN_ZERO(ibv_post_recv(ep.local.ibvHandle.qp, &wr, &bad));
     } else if (wc.opcode == IBV_WC_SEND) {
       uint64_t id = wc.wr_id;
     } else {
@@ -349,7 +345,8 @@ void NotifManager::MainLoop() {
     }
   } else {
     while (running.load()) {
-      rdma->EnumerateEndpoints([this](int qpn, const EpPair& ep) { this->ProcessOneCqe(qpn, ep); });
+      rdma->EnumerateEndpoints(
+          [this](uint32_t qpn, const EpPair& ep) { this->ProcessOneCqe(qpn, ep); });
     }
   }
 }
@@ -432,7 +429,6 @@ void ControlPlaneServer::BuildRdmaConn(EngineKey ekey, TopoKeyPair topo) {
 
   rdma->ConnectEndpoint(ekey, devId, lep, msg.devId, msg.eph, topo, weight);
   notif->RegisterEndpointByQpn(lep.handle.qpn);
-  notif->RegisterDevice(devId);
   ctx->CloseEndpoint(tcph);
 }
 
@@ -494,7 +490,6 @@ void ControlPlaneServer::HandleControlPlaneProtocol(int fd) {
       p.WriteMessageRegEndpoint(MessageRegEndpoint{myEngKey, msg.topo, devId, lep.handle});
       rdma->ConnectEndpoint(msg.ekey, devId, lep, rdevId, msg.eph, msg.topo, weight);
       notif->RegisterEndpointByQpn(lep.handle.qpn);
-      notif->RegisterDevice(devId);
       SYSCALL_RETURN_ZERO(epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL));
       break;
     }
