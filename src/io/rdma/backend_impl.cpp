@@ -55,9 +55,10 @@ std::vector<std::pair<int, int>> RdmaManager::Search(TopoKey key) {
         return {{i, 1}};
       }
     }
+  } else if (key.loc == MemoryLocationType::CPU) {
+    return {{0, 1}};
   } else {
-    assert("topo searching for device other than GPU is not implemented yet");
-    return {};
+    assert(false && "topo searching for device other than GPU or CPU is not implemented yet");
   }
   return {};
 }
@@ -132,13 +133,13 @@ EpPairVec RdmaManager::GetAllEndpoint(EngineKey engine, TopoKeyPair key) {
 application::RdmaEndpointConfig RdmaManager::GetRdmaEndpointConfig(int portId) {
   application::RdmaEndpointConfig config;
   config.portId = portId;
-  config.gidIdx = 3;
+  config.gidIdx = 1;
   config.maxMsgsNum = 8192;
   config.maxMsgSge = 1;
   config.maxCqeNum = 8192;
   config.alignment = PAGESIZE;
   config.withCompChannel = true;
-  config.enableSrq = true;
+  config.enableSrq = false;
   return config;
 }
 
@@ -213,6 +214,11 @@ void NotifManager::RegisterEndpointByQpn(uint32_t qpn) {
 }
 
 void NotifManager::RegisterDevice(int devId) {
+  // Skip notification setup if disabled
+  if (!config.enableNotification) {
+    return;
+  }
+
   std::lock_guard<std::mutex> lock(mu);
   if (notifCtx.find(devId) != notifCtx.end()) return;
 
@@ -252,6 +258,12 @@ void NotifManager::ProcessOneCqe(int qpn, const EpPair& ep) {
   struct ibv_wc wc{};
   while (ibv_poll_cq(cq, 1, &wc) > 0) {
     if (wc.opcode == IBV_WC_RECV) {
+      // Skip RECV processing if notification is disabled
+      if (!config.enableNotification) {
+        MORI_IO_WARN("Received unexpected RECV completion when notification is disabled");
+        continue;
+      }
+
       std::lock_guard<std::mutex> lock(mu);
       int devId = ep.ldevId;
 
@@ -587,7 +599,7 @@ void RdmaBackendSession::ReadWrite(size_t localOffset, size_t remoteOffset, size
     status->SetCode(ret.code);
     status->SetMessage(ret.message);
   }
-  if (!ret.Failed()) {
+  if (!ret.Failed() && config.enableNotification) {
     RdmaNotifyTransfer(eps, status, id);
   }
 }
@@ -612,7 +624,7 @@ void RdmaBackendSession::BatchReadWrite(const SizeVec& localOffsets, const SizeV
     status->SetCode(ret.code);
     status->SetMessage(ret.message);
   }
-  if (!ret.Failed()) {
+  if (!ret.Failed() && config.enableNotification) {
     RdmaNotifyTransfer(eps, status, id);
   }
 }

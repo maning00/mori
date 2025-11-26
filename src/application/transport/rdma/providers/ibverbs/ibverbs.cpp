@@ -132,7 +132,7 @@ void IBVerbsDeviceContext::ConnectEndpoint(const RdmaEndpointHandle& local,
     union ibv_gid dgid;
     memcpy(dgid.raw, remote.eth.gid, 16);
     attr.ah_attr.grh.dgid = dgid;
-    attr.ah_attr.grh.sgid_index = 3;
+    attr.ah_attr.grh.sgid_index = 1;
     attr.ah_attr.grh.hop_limit = 1;
   }
   flags = IBV_QP_STATE | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN |
